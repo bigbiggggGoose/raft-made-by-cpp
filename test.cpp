@@ -1,16 +1,37 @@
 #include "raft.h"
 #include <thread>
 #include <chrono>
+#include <unordered_map>
+
+// 简单的内存总线 RPC 实现
+class InMemoryRpc : public IRaftRpc {
+public:
+  std::unordered_map<int, raft*> id2node;
+  bool requestVote(int targetId, int term, int candidateId,
+                   int candidateLastLogIndex, int candidateLastLogTerm) override {
+    auto it = id2node.find(targetId);
+    if (it == id2node.end()) return false;
+    return it->second->onRequestVote(term, candidateId, candidateLastLogIndex, candidateLastLogTerm);
+  }
+  bool appendEntriesHeartbeat(int targetId, int leaderTerm, int leaderId) override {
+    auto it = id2node.find(targetId);
+    if (it == id2node.end()) return false;
+    return it->second->onHeartbeat(leaderTerm, leaderId);
+  }
+};
 
 
 int main(){
-   raft n1; n1.setId(1);
-   raft n2; n2.setId(2);
-   raft n3; n3.setId(3);
+   InMemoryRpc bus;
+   raft n1; n1.setId(1); n1.setRpc(&bus);
+   raft n2; n2.setId(2); n2.setRpc(&bus);
+   raft n3; n3.setId(3); n3.setRpc(&bus);
 
-   n1.addPeer(&n2); n1.addPeer(&n3);
-   n2.addPeer(&n1); n2.addPeer(&n3);
-   n3.addPeer(&n1); n3.addPeer(&n2);
+   bus.id2node[1] = &n1; bus.id2node[2] = &n2; bus.id2node[3] = &n3;
+
+   n1.addPeerId(2); n1.addPeerId(3);
+   n2.addPeerId(1); n2.addPeerId(3);
+   n3.addPeerId(1); n3.addPeerId(2);
 
    n1.start(); n2.start(); n3.start();
 

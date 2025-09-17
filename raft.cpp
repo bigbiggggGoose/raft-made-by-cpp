@@ -88,7 +88,8 @@ void raft::init(){
 // ============ 新增：节点/集群辅助 ============
 void raft::setId(int nid){ id = nid; }
 int raft::getId() const { return id; }
-void raft::addPeer(raft* peer){ if(peer && peer != this) peers.push_back(peer); }
+void raft::addPeerId(int peerId){ if(peerId != id) peerIds.push_back(peerId); }
+void raft::setRpc(IRaftRpc* r){ rpc = r; }
 
 void raft::setAlive(bool ok){ alive.store(ok); }
 
@@ -104,7 +105,7 @@ void raft::stop(){
     if(heartbeatThread.joinable()) heartbeatThread.join();
 }
 
-void raft::resetElectionTimer(){
+void raft::resetElectionTimer(){  //
     using namespace std::chrono;
     static thread_local std::mt19937_64 rng(
         static_cast<uint64_t>(steady_clock::now().time_since_epoch().count())
@@ -130,10 +131,7 @@ void raft::startElectionLoop(){
 
 void raft::startHeartbeatLoop(){
     while(running.load() && role == "leader" && alive.load()){
-        for(auto* p : peers){
-            if(!p) continue;
-            p->onHeartbeat(term, id);
-        }
+        for(int pid : peerIds){ if(rpc) rpc->appendEntriesHeartbeat(pid, term, id); }
         std::this_thread::sleep_for(std::chrono::milliseconds(heartbeatTimeout));
     }
 }
@@ -158,7 +156,6 @@ bool raft::onRequestVote(int candidateTerm, int candidateId,
                          int candidateLastLogIndex, int candidateLastLogTerm){
     // 如果候选人 term 比我小，拒绝
     if(candidateTerm < term) return false;
-
     // 如果候选人 term 更大，更新本地任期并转为 follower
     if(candidateTerm > term){
         term = candidateTerm;
@@ -187,15 +184,13 @@ void raft::election(){
     votedFor = id;
     int votes = 1; // 自投一票
 
-    // 广播 RequestVote 到 peers
-    for(auto* p : peers){
-        if(!p) continue;
-        bool granted = p->onRequestVote(myTerm, id, lastLogIndex, lastLogTerm);
-        if(granted) votes += 1;
+    // 广播 RequestVote 给 peers
+    for(int pid : peerIds){
+        if(rpc && rpc->requestVote(pid, myTerm, id, lastLogIndex, lastLogTerm)) votes += 1;
     }
 
     // 多数票当选
-    int clusterSize = static_cast<int>(peers.size()) + 1;
+    int clusterSize = static_cast<int>(peerIds.size()) + 1;
     if(votes > clusterSize/2&& role == "candidate" && term == myTerm){
         term = myTerm;
         becomeLeader();
@@ -215,7 +210,7 @@ void raft::becomeLeader(){
         std::lock_guard<std::mutex> lock(g_log_mtx);
         std::cout << "Node " << id << " becomes leader at term " << term << std::endl;
     }
-    for(auto* p : peers){ if(p) p->onHeartbeat(term, id); }
+    for(int pid : peerIds){ if(rpc) rpc->appendEntriesHeartbeat(pid, term, id); }
     // 开启心跳线程
     if(heartbeatThread.joinable()) heartbeatThread.join();
     heartbeatThread = std::thread([this]{ this->startHeartbeatLoop(); });

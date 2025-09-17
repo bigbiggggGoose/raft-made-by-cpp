@@ -11,6 +11,15 @@
 extern std::mutex g_log_mtx;
 using std::string;
 
+// 抽象 RPC 接口
+class IRaftRpc {
+public:
+    virtual ~IRaftRpc() = default;
+    virtual bool requestVote(int targetId, int term, int candidateId,
+                             int candidateLastLogIndex, int candidateLastLogTerm) = 0;
+    virtual bool appendEntriesHeartbeat(int targetId, int leaderTerm, int leaderId) = 0;
+};
+
 class raft {
     struct Log
     {
@@ -32,8 +41,9 @@ class raft {
     int lastLogIndex = -1;      // 简化：记录最后日志索引
     int lastLogTerm = 0;        // 简化：记录最后日志任期
 
-    // 简易集群（本地模拟）：保存其他节点指针
-    std::vector<raft*> peers;
+    // 集群：保存其他节点的 id，通过 RPC 调用
+    std::vector<int> peerIds;
+    IRaftRpc* rpc = nullptr;
 
     // 并发/定时
     std::atomic<bool> running{false};
@@ -73,7 +83,8 @@ public:
     // 节点/集群辅助
     void setId(int nid);
     int getId() const;
-    void addPeer(raft* peer);
+    void addPeerId(int peerId);
+    void setRpc(IRaftRpc* r);
     void setAlive(bool ok);
     bool isAlive() const { return alive.load(); }
     void start();
