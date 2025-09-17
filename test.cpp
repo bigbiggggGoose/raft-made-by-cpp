@@ -15,7 +15,7 @@ int main(){
    n1.start(); n2.start(); n3.start();
 
    // 运行一段时间，观察谁成为 leader
-   std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+   std::this_thread::sleep_for(std::chrono::milliseconds(1500));
 
    // 模拟 leader 宕机：找到 leader 并置为 false
    if(n1.getRole() == "leader") n1.setAlive(false);

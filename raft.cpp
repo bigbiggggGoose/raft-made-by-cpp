@@ -1,7 +1,10 @@
 #include "raft.h"
 #include <thread>
 #include <chrono>
+#include <random>
+#include <cstdint>
 using namespace std::chrono;
+std::mutex g_log_mtx;
 
 raft::raft(){
     role = "follower";
@@ -102,8 +105,13 @@ void raft::stop(){
 }
 
 void raft::resetElectionTimer(){
+    using namespace std::chrono;
+    static thread_local std::mt19937_64 rng(
+        static_cast<uint64_t>(steady_clock::now().time_since_epoch().count())
+        ^ (static_cast<uint64_t>(id) * 0x9e37ULL));
+    std::uniform_int_distribution<int> dist(150, 450);
     lastHeartbeatTime = steady_clock::now();
-    randomizedElectionTimeoutMs = electionTimeout + (id * 53 % 150) + 150; // 150~449ms
+    randomizedElectionTimeoutMs = electionTimeout + dist(rng);
 }
 
 void raft::startElectionLoop(){
@@ -174,20 +182,22 @@ bool raft::onRequestVote(int candidateTerm, int candidateId,
 void raft::election(){
     // 转为 candidate，提升任期并给自己投票
     role = "candidate";
-    term += 1;
+    int myTerm = term + 1; 
+    term =myTerm;
     votedFor = id;
     int votes = 1; // 自投一票
 
     // 广播 RequestVote 到 peers
     for(auto* p : peers){
         if(!p) continue;
-        bool granted = p->onRequestVote(term, id, lastLogIndex, lastLogTerm);
+        bool granted = p->onRequestVote(myTerm, id, lastLogIndex, lastLogTerm);
         if(granted) votes += 1;
     }
 
     // 多数票当选
     int clusterSize = static_cast<int>(peers.size()) + 1;
-    if(votes > clusterSize/2){
+    if(votes > clusterSize/2&& role == "candidate" && term == myTerm){
+        term = myTerm;
         becomeLeader();
     }else{
         // 失败则回到 follower（简化）
@@ -199,8 +209,12 @@ void raft::election(){
 void raft::becomeLeader(){
     role = "leader";
     leaderId = id;
+    lastHeartbeatTime = std::chrono::steady_clock::now();   // 晋升为 Leader 时重置自身计时器
     // 打印并立即发送一次心跳
-    std::cout << "Node " << id << " becomes leader at term " << term << std::endl;
+    {
+        std::lock_guard<std::mutex> lock(g_log_mtx);
+        std::cout << "Node " << id << " becomes leader at term " << term << std::endl;
+    }
     for(auto* p : peers){ if(p) p->onHeartbeat(term, id); }
     // 开启心跳线程
     if(heartbeatThread.joinable()) heartbeatThread.join();

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 
+extern std::mutex g_log_mtx;
 using std::string;
 
 class raft {
