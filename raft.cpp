@@ -127,17 +127,18 @@ void raft::resetElectionTimer(){  //
 }
 
 void raft::startElectionLoop(){
-    while(running.load()){
+    while (running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        if(!alive.load()) continue;
-
-        auto now = steady_clock::now();
-        auto msSince = duration_cast<milliseconds>(now - lastHeartbeatTime).count();
-        if(msSince >= randomizedElectionTimeoutMs){
-            this->election();
-            resetElectionTimer();
+        if (!alive.load()) continue;
+      
+        auto now = std::chrono::steady_clock::now();
+        if (role == "leader") {            // 关键：Leader 跳过选举检测
+          lastHeartbeatTime = now;
+          continue;
         }
-    }
+        auto msSince = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHeartbeatTime).count();
+        if (msSince >= randomizedElectionTimeoutMs) { election(); resetElectionTimer(); }
+      }
 }
 
 void raft::startHeartbeatLoop(){
