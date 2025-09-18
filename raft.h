@@ -1,5 +1,5 @@
 #pragma once
-
+#include "IRaftRpc.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -11,20 +11,14 @@
 extern std::mutex g_log_mtx;
 using std::string;
 
-// 抽象 RPC 接口
-class IRaftRpc {
-public:
-    virtual ~IRaftRpc() = default;
-    virtual bool requestVote(int targetId, int term, int candidateId,
-                             int candidateLastLogIndex, int candidateLastLogTerm) = 0;
-    virtual bool appendEntriesHeartbeat(int targetId, int leaderTerm, int leaderId) = 0;
-};
+
 
 class raft {
     struct Log
     {
         int index = -1;         // 日志记录的索引
         int term = 0;           // 日志记录的任期
+        string cmd; 
         std::string content;    // 内容
     };
 
@@ -37,9 +31,12 @@ class raft {
     int electionTimeout;        // 选举超时（ms）
     int votedFor;               // 当前任期投给谁
     int state;                  // 自定义状态位
-    int log[1000];              // 简化日志占位
-    int lastLogIndex = -1;      // 简化：记录最后日志索引
-    int lastLogTerm = 0;        // 简化：记录最后日志任期
+    // 日志与提交状态（简化）
+    Log logs[1024];
+    int lastLogIndex = -1;      // 最后日志索引
+    int lastLogTerm = 0;        // 最后日志任期
+    int commitIndex = -1;       // 已提交最大索引
+    int lastApplied = -1;       // 已应用最大索引
 
     // 集群：保存其他节点的 id，通过 RPC 调用
     std::vector<int> peerIds;
@@ -99,6 +96,15 @@ public:
                        int candidateLastLogIndex, int candidateLastLogTerm);
     void becomeLeader();
     bool onHeartbeat(int leaderTerm, int fromLeaderId);
+    // 追加日志处理（由 RPC 调用）
+    bool onAppendEntries(int term, int leaderId,
+                         int prevLogIndex, int prevLogTerm,
+                         const std::string& cmd, const std::string& content,
+                         int entryTerm, int entryIndex, bool hasEntry,
+                         int leaderCommit);
+    // 客户端在 leader 上提交命令（简化：单条）
+    void clientPropose(const std::string& cmd, const std::string& content);
+    void applyCommitted();
 
     // 其余接口（占位）
     void vote();

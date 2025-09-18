@@ -46,7 +46,8 @@ int raft::getState(){
     return state;
 }
 int raft::getLog(int index){
-    return log[index];
+    if(index >= 0 && index <= lastLogIndex) return logs[index].term;
+    return 0;
 }
 void raft::setRole(string role){
     this->role = role;
@@ -70,7 +71,13 @@ void raft::setState(int state){
     this->state = state;
 }
 void raft::setLog(int index, int log){
-    this->log[index] = log;
+    if(index < 0 || index >= 1024) return;
+    logs[index].index = index;
+    logs[index].term = log;
+    if(index > lastLogIndex){
+        lastLogIndex = index;
+        lastLogTerm = logs[index].term;
+    }
 }
 
 
@@ -83,6 +90,10 @@ void raft::init(){
     electionTimeout = 150;
     votedFor = -1;
     state = 0;
+    lastLogIndex = -1;
+    lastLogTerm = 0;
+    commitIndex = -1;
+    lastApplied = -1;
 }
 
 // ============ 新增：节点/集群辅助 ============
@@ -131,7 +142,7 @@ void raft::startElectionLoop(){
 
 void raft::startHeartbeatLoop(){
     while(running.load() && role == "leader" && alive.load()){
-        for(int pid : peerIds){ if(rpc) rpc->appendEntriesHeartbeat(pid, term, id); }
+        for(int pid : peerIds){ if(rpc) rpc->appendEntriesHeartbeat(pid, term, id, commitIndex); }
         std::this_thread::sleep_for(std::chrono::milliseconds(heartbeatTimeout));
     }
 }
@@ -147,6 +158,68 @@ bool raft::onHeartbeat(int leaderTerm, int fromLeaderId){
     leaderId = fromLeaderId;
     lastHeartbeatTime = steady_clock::now();
     return true;
+}
+
+bool raft::onAppendEntries(int rterm, int leaderIdIn,
+                           int prevLogIndex, int prevLogTerm,
+                           const std::string& cmd, const std::string& content,
+                           int entryTerm, int entryIndex, bool hasEntry,
+                           int leaderCommit){
+    if(!alive.load()) return false;
+    if(rterm < term) return false;
+    if(rterm > term){ term = rterm; votedFor = -1; }
+    role = "follower"; leaderId = leaderIdIn; lastHeartbeatTime = steady_clock::now();
+
+    if(prevLogIndex >= 0){
+        if(prevLogIndex > lastLogIndex) return false;
+        if(logs[prevLogIndex].term != prevLogTerm) return false;
+    }
+    if(hasEntry){
+        if(entryIndex <= lastLogIndex && logs[entryIndex].term != entryTerm){
+            lastLogIndex = entryIndex - 1;
+        }
+        logs[entryIndex] = {entryIndex, entryTerm, cmd, content};
+        if(entryIndex > lastLogIndex) lastLogIndex = entryIndex;
+        lastLogTerm = logs[lastLogIndex].term;
+    }
+    if(leaderCommit > commitIndex){
+        commitIndex = std::min(leaderCommit, lastLogIndex);
+        applyCommitted();
+    }
+    return true;
+}
+
+void raft::applyCommitted(){
+    while(lastApplied < commitIndex){
+        lastApplied++;
+        std::lock_guard<std::mutex> lk(g_log_mtx);
+        std::cout << "Node " << id << " apply index=" << lastApplied
+                  << " term=" << logs[lastApplied].term
+                  << " cmd=" << logs[lastApplied].cmd
+                  << " content=" << logs[lastApplied].content << std::endl;
+    }
+}
+
+void raft::clientPropose(const std::string& cmd, const std::string& content){
+    if(role != "leader") return;
+    int newIndex = lastLogIndex + 1;
+    logs[newIndex] = {newIndex, term, cmd, content};
+    lastLogIndex = newIndex; lastLogTerm = term;
+
+    int acks = 1;
+    for(int pid : peerIds){
+        if(!rpc) continue;
+        bool ok = rpc->appendEntries(pid, term, id,
+                                     newIndex-1, (newIndex-1>=0?logs[newIndex-1].term:0),
+                                     cmd, content, term, newIndex, true,
+                                     commitIndex);
+        if(ok) acks++;
+    }
+    int clusterSize = static_cast<int>(peerIds.size()) + 1;
+    if(acks > clusterSize/2){
+        commitIndex = newIndex;
+        applyCommitted();
+    }
 }
  
  
@@ -210,7 +283,7 @@ void raft::becomeLeader(){
         std::lock_guard<std::mutex> lock(g_log_mtx);
         std::cout << "Node " << id << " becomes leader at term " << term << std::endl;
     }
-    for(int pid : peerIds){ if(rpc) rpc->appendEntriesHeartbeat(pid, term, id); }
+    for(int pid : peerIds){ if(rpc) rpc->appendEntriesHeartbeat(pid, term, id, commitIndex); }
     // 开启心跳线程
     if(heartbeatThread.joinable()) heartbeatThread.join();
     heartbeatThread = std::thread([this]{ this->startHeartbeatLoop(); });
