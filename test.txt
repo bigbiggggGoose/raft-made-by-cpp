@@ -1,0 +1,160 @@
+#include "raft.h"
+#include <thread>
+#include <chrono>
+using namespace std::chrono;
+//检测到心跳失效->选举
+//怎么记录term :myterm
+//实现寻求投票 任期判断  日志判断
+//判断当选
+
+
+
+void raft::raft(){
+term=0;
+role="Follower";
+status=1;
+votedFor=0;
+electionInterval=150;
+heartbeatInterval=150;
+heartbeatClock=steady_clock::now();
+}
+
+void raft::start(){
+    if(electionThread.joinable()) electionThread.join();
+    electionThread = std::thread([this]{ this->rpc->electionLoop(id); });
+}
+void raft::setRpc(raftRpc* r){
+    rpc=r;
+}
+//心跳-- 应该调整什么信息
+//当选和心跳怎么联系->怎么周期发心跳
+//leader挂了怎么表示alive=false
+//heartbeat断开和election怎么联系  :用时间判断是否超时
+void raft::becomeLeader(){
+    role="Leader";
+    leader_id=id;
+    heartbeatClock=steady_clock::now();
+    // 开启心跳线程
+    if(heartbeatThread.joinable()) heartbeatThread.join();
+    heartbeatThread = std::thread([this]{ this->rpc->startHeartbeat(id); });
+}
+
+void raft::startHeartbeat(){
+    while(true){
+        if(!isAlive())break;
+        for(int i:serverNum){
+            if(servers[i]->isAlive()==false)continue;  ///
+            if(rpc->sendHeartbeat(term,id))break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(heartbeatInterval));
+    }
+}
+
+bool raft::sendHeartbeat(int leaderTerm,int leaderId){
+    if(!isAlive()&&this->id==leaderId)return false;
+    role="Follower";
+    this->leader_term=leaderTerm;
+    this->leader_id=leaderId;
+    heartbeatClock=steady_clock::now();
+
+    return true;
+}
+
+bool raft::requestVote(int targetId, int targetTerm, int candidateId,
+        int candidateLastLogIndex, int candidateLastLogTerm){
+if(targetTerm<this->term)return false;
+if(targetTerm<candidateLastLogTerm)return false;
+if(candidateLastLogIndex<lastLogIndex)return false; //
+
+    role="Follower";
+    votedFor=candidateId;
+    return true;
+}
+
+void raft::electionLoop(){
+    while(true){
+        if(!isAlive())break;
+        int end=steady_clock::now();
+        if(end-heartbeatClock>heartbeatInterval){
+            rpc->election(id);
+            if(!isAlive())break;
+            heartbeatClock=end;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
+void raft::election(){
+    int myTerm = ++term;
+    role= "Candidate";
+    votedFor=id;
+    int votes = 1; // 自投一票
+    for(int i:serverNum){
+    if(servers[i]->isAlive()==false||i==id)continue;
+    if(rpc->requestVote(i,id,lastLogIndex,lastLogTerm))votes++;
+    }
+
+        // 多数票当选
+        int clusterSize = static_cast<int>(peerIds.size()) + 1;  //？
+        if(votes > clusterSize/2&& role == "candidate" && term == myTerm){
+            term = myTerm;
+            becomeLeader();
+        }else{
+            role = "follower";
+        }
+}
+
+//日志：
+//-1:没问题
+//n ：n之前都是一致的
+int raft::checkLogs(int index,int term){
+    for(int i=index;i<=lastLogIndex;i++){
+        if(logs[i].term!=this->logs[i].term)return i;
+    }
+    return -1;
+}
+bool raft::recvLogs(int leaderTerm,int leaderId,log logs){
+    this->logs[logs.index]=logs;
+    commitIndex=logs.index;
+    lastLogIndex=logs.index;
+    lastLogTerm=logs.term;
+    return true;
+}
+bool raft::sendLogs(int leaderTerm,int leaderId,log logs){
+    for(int i:serverNum){
+        if(servers[i]->isAlive()==false)continue;
+        rpc->recvLogs(i,leaderTerm,leaderId,logs);
+    }
+    //半数发送成功后提交并让follower应用
+    if(votes>serverNum.size()/2){
+        rpc->applyLogs(id,logs.index,logs.term);
+    }
+    return true;
+}
+void raft::applyLogs(int logIndex,int logTerm){lastAppliedIndex=logIndex;}//可放入实现函数
+void raft::syncLogs(int leaderTerm,int leaderId,log logs){
+    for(int i:serverNum){
+        if(i==leaderId)continue;
+        checkThread=std::thread([i]{
+             do
+             {
+             if(servers[i]->isAlive()==false)break;
+             int checkIndex=rpc->checkLogs(i,logs.index,logs.term); 
+             if(checkIndex!=-1){
+                if(checkIndex>servers[leaderId]->lastLogIndex){ ////
+                lastLogIndex=servers[leaderId]->lastLogIndex;
+                lastLogTerm=servers[leaderId]->lastLogTerm;
+                break;
+            }
+                recvLogs(leaderTerm,leaderId,logs);
+                applyLogs(checkIndex,logs.term);
+             }else break;
+            }while(checkIndex!=-1);
+            checkThread.join();
+            });
+
+    }
+}
+
+
+
